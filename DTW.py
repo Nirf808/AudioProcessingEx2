@@ -6,6 +6,14 @@ import librosa
 import numpy as np
 from numpy.typing import NDArray
 from numba import njit
+import matplotlib
+import matplotlib.pyplot as plt
+matplotlib.use('TkAgg')
+import librosa.display  # Explicit import needed for specshow
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
+
 
 RANDOM_RECORD_NAME = "random"
 RECORD_NAMES = [str(i) for i in range(10)]
@@ -17,10 +25,21 @@ FILTER_BANKS = 80
 
 
 class PersonRecording:
-    def __init__(self, recording: NDArray[np.float32], mel_spectrom, sample_rate: int, recorder_name: str,
+    def __init__(self,
+                 raw_recording: NDArray[np.float32],
+                 sample_rate: int,
+                 recorder_name: str,
                  recording_name: str):
-        self.raw_recording = recording
-        self.mel_spectrom = mel_spectrom
+        self.raw_recording = raw_recording
+        self.agc_normalized_recording = raw_recording / np.max(np.abs(raw_recording))
+        self.mel_spectrom = librosa.feature.melspectrogram(
+            y=self.agc_normalized_recording,
+            sr=sample_rate,
+            n_mels=FILTER_BANKS,
+            hop_length=HOP_SIZE,
+            win_length=WINDOW_SIZE
+        )
+        self.mel_db = librosa.power_to_db(self.mel_spectrom, ref=np.max)
         self.sample_rate = sample_rate
         self.recorder_name = recorder_name
         self.record_name = recording_name
@@ -43,18 +62,86 @@ class RecordingDataset:
         self.reference = reference
         self.training_set = train
         self.validation_set = validation
-        self.dtw = np.full((4, 10, 11), -1)
 
-    def train(self):
-        for i, person in enumerate(self.training_set):
-            for j, train_record_name in enumerate(RECORD_NAMES):
-                current_train_record = self.training_set[i].get_recording(train_record_name)
-                for k, reference_record_name in enumerate(RECORD_NAMES_WITH_RANDOM):
-                    current_reference_record = self.reference.get_recording(reference_record_name)
-                    s = time.time()
-                    self.dtw[i][j][k] = calc_dtw(current_train_record.mel_spectrom.T,
-                                                 current_reference_record.mel_spectrom.T)
-                    print('took: ', time.time() - s)
+def draw_mel_spectrograms(dataset: RecordingDataset):
+    """
+    Draws a grid of Mel Spectrograms.
+    Rows: Different people from the training set.
+    Cols: Digits 1, 5, 8.
+    """
+    target_digits = ["1", "3", "5", "8"]
+    people = dataset.training_set
+
+    n_rows = len(people)
+    n_cols = len(target_digits)
+
+    # Create the plot grid
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 3 * n_rows), constrained_layout=True)
+
+    # Ensure axes is always a 2D array even if there is only 1 person
+    if n_rows == 1:
+        axes = np.array([axes])
+
+    for row_idx, person in enumerate(people):
+        # Handle the typo in your class definition (recoder_name vs recorder_name)
+        person_name = person.recoder_name
+
+        for col_idx, digit in enumerate(target_digits):
+            ax = axes[row_idx, col_idx]
+
+            try:
+                # 1. Get the recording object
+                recording_obj = person.get_recording(digit)
+
+                # 2. Convert power spectrogram to dB for visualization
+                # (Raw mel power is usually too dark to see structure)
+                mel_db = librosa.power_to_db(recording_obj.mel_spectrom, ref=np.max)
+
+                # 3. Draw
+                librosa.display.specshow(
+                    mel_db,
+                    sr=recording_obj.sample_rate,
+                    hop_length=HOP_SIZE,
+                    x_axis='time',
+                    y_axis='mel',
+                    ax=ax
+                )
+
+                ax.set_title(f"{person_name} - Digit {digit}")
+
+                # Remove axis labels for inner plots to reduce clutter
+                if row_idx < n_rows - 1:
+                    ax.set_xlabel('')
+                if col_idx > 0:
+                    ax.set_ylabel('')
+
+            except KeyError:
+                # Handle cases where a specific digit might be missing
+                ax.text(0.5, 0.5, "Missing Audio", ha='center', va='center')
+                ax.set_title(f"{person_name} - {digit}")
+
+    plt.suptitle("Mel Spectrograms: Training Set (Rows=Person, Cols=Digit)")
+    plt.show()
+
+
+def calc_dtw_table(reference: PersonRecordings, training_set: List[PersonRecordings]):
+    s = time.time()
+    dtw_table = np.full((len(training_set), len(reference.recordings), len(reference.recordings)), -1, dtype=np.float32)
+    for train_recorder_index, person in enumerate(training_set):
+        for train_record_number, train_record_name in enumerate(RECORD_NAMES):
+            current_train_record = training_set[train_recorder_index].get_recording(train_record_name)
+            for reference_recond_number, reference_record_name in enumerate(RECORD_NAMES_WITH_RANDOM):
+                current_reference_record = reference.get_recording(reference_record_name)
+                current_dtw = calc_dtw(
+                    current_train_record.mel_db.T,
+                    current_reference_record.mel_db.T)
+                normalized_current_dtw = current_dtw / (current_reference_record.mel_db.shape[1] + current_train_record.mel_db.shape[1])
+                dtw_table[train_recorder_index][train_record_number][reference_recond_number] = normalized_current_dtw
+            print(f"finish {str(train_record_number) + 'th' if train_record_number < 10 else 'random'} record of"
+                  f" {training_set[train_recorder_index].recoder_name}")
+        print(f"finish comparing {training_set[train_recorder_index].recoder_name} records")
+    print('took: ', time.time() - s)
+    return dtw_table
 
 
 def load_dataset(path: str) -> RecordingDataset:
@@ -125,82 +212,21 @@ def load_person_recordings(path: str, is_reference: bool) -> PersonRecordings:
     if not person_dir.is_dir():
         raise ValueError(f"Not a directory: {person_dir}")
 
-    name = person_dir.name
-    person_recordings = PersonRecordings(recorder_name=name)
-
-    random_found = False
+    person_recordings = PersonRecordings(recorder_name=person_dir.name)
 
     for wav_path in person_dir.glob("*.wav"):
-        stem = wav_path.stem  # filename without .wav
+        stem = wav_path.stem
+        _, recording_name = stem.rsplit(" ", 1)
 
-        # ---- Special case: reference random file ----
-        if is_reference and stem == f"{name} random":
-            recording, sample_rate = librosa.load(
-                wav_path,
-                sr=16000,
-                mono=True,
-            )
-
-            raw_recording = np.asarray(recording, dtype=np.float32)
-            mel_power_spectrogram = librosa.feature.melspectrogram(
-                y=raw_recording,
-                sr=sample_rate,
-                n_fft=FILTER_BANKS,
-                hop_length=HOP_SIZE,
-                win_length=WINDOW_SIZE
-            )
-
-            person_recordings.add_recording(
-                PersonRecording(
-                    recording=np.asarray(recording, dtype=np.float32),
-                    mel_spectrom=mel_power_spectrogram,
-                    sample_rate=sample_rate,
-                    recorder_name=name,
-                    recording_name="random",
-                )
-            )
-
-            random_found = True
-            continue
-
-        # ---- Normal numbered recordings ----
-        try:
-            _, digit_str = stem.rsplit(" ", 1)
-        except ValueError:
-            raise ValueError(f"Invalid filename format: {wav_path.name}")
-
-        if not (len(digit_str) == 1 and digit_str.isdigit()):
-            raise ValueError(f"Expected single digit number in filename: {wav_path.name}")
-
-        recording, sample_rate = librosa.load(
-            wav_path,
-            sr=16000,
-            mono=True,
-        )
-
+        recording, sample_rate = librosa.load(wav_path, sr=16000, mono=True)
         raw_recording = np.asarray(recording, dtype=np.float32)
-        mel_power_spectrogram = librosa.feature.melspectrogram(
-            y=raw_recording,
-            sr=sample_rate,
-            n_mels=FILTER_BANKS,
-            hop_length=HOP_SIZE,
-            win_length=WINDOW_SIZE
-        )
-
         person_recordings.add_recording(
             PersonRecording(
-                recording=np.asarray(recording, dtype=np.float32),
-                mel_spectrom=mel_power_spectrogram,
+                raw_recording=raw_recording,
                 sample_rate=sample_rate,
-                recorder_name=name,
-                recording_name=digit_str,
+                recorder_name=person_dir.name,
+                recording_name=recording_name,
             )
-        )
-
-    # ---- Validation: random must exist for reference ----
-    if is_reference and not random_found:
-        raise ValueError(
-            f"Reference person '{name}' must contain '{name} random.wav'"
         )
 
     return person_recordings
@@ -249,11 +275,172 @@ def calc_dtw_c(record_a: NDArray[np.float32], record_b: [np.float32], dist_matri
     return accumulated_cost_matrix[len(record_b), len(record_a)]
 
 
+def plot_dtw_heatmap(training_set, dtw_table):
+    """
+    Plots the DTW cost table as a 40x11 heatmap.
+    dtw_table: Shape (4, 10, 11) -> (Speakers, Digits, References)
+    """
+    # 1. Reshape according to assignment hint (40x11)
+    n_speakers, n_digits, n_refs = dtw_table.shape
+    # Combine speakers and digits into one dimension (rows)
+    matrix_2d = dtw_table.reshape(n_speakers * n_digits, n_refs)
+
+    # 2. Setup Plot
+    # Tall figure to accommodate 40 rows clearly
+    fig, ax = plt.subplots(figsize=(12, 20))
+
+    # 3. Create Heatmap
+    # 'viridis' is standard. You can use 'coolwarm' or 'Blues'.
+    # We use aspect='auto' so the cells aren't forced to be square (since 40x11 is tall)
+    im = ax.imshow(matrix_2d, cmap='viridis', aspect='auto')
+
+    # Add Colorbar
+    cbar = ax.figure.colorbar(im, ax=ax)
+    cbar.ax.set_ylabel("DTW Cost (Lower is Better)", rotation=-90, va="bottom")
+
+    # 4. Configure Axis Labels
+    # X-Axis: The 11 References (0-9 + Random)
+    x_labels = [str(i) for i in range(10)] + ["Random"]
+    ax.set_xticks(np.arange(len(x_labels)))
+    ax.set_xticklabels(x_labels)
+    ax.set_xlabel("Reference Digits (DB)")
+    ax.xaxis.tick_top()  # Put X labels on top for easier reading
+    ax.xaxis.set_label_position('top')
+
+    # Y-Axis: The 40 Test Signals
+    # Label format: "Speaker i - Digit j"
+    y_labels = []
+    for s in range(n_speakers):
+        for d in range(n_digits):
+            y_labels.append(f"{training_set[s].recoder_name} - {str(d) if d < 10 else 'random'}")
+
+    ax.set_yticks(np.arange(len(y_labels)))
+    ax.set_yticklabels(y_labels)
+    ax.set_ylabel("Test Signals (Training Set)")
+
+    # 5. Annotate with Exact Numbers
+    # Loop over data dimensions and create text annotations.
+    # We choose text color based on background intensity for readability.
+    threshold = matrix_2d.max() / 2.0
+
+    for i in range(matrix_2d.shape[0]):
+        for j in range(matrix_2d.shape[1]):
+            val = matrix_2d[i, j]
+            # Simple contrast logic: if value is low (dark background in viridis), use white text.
+            # Note: In 'viridis', low values are purple (dark), high are yellow (light).
+            text_color = "white" if val < threshold else "black"
+
+            # Formatting: No decimals or 1 decimal place to save space
+            ax.text(j, i, f"{val:.0f}",
+                    ha="center", va="center", color=text_color, fontsize=9)
+
+    plt.tight_layout()
+    plt.title("DTW Distance Matrix (40x11)", y=1.02)
+    plt.pause(0.5)
+
+
+def evalute_threshold(threshold_to_check: float, dtw_table: NDArray[np.float32]):
+    classifications = evaluate_classifications(dtw_table)
+    min_dtw_per_recorder_and_number = np.min(dtw_table, axis=2)
+    good_classifications_with_threshold = (min_dtw_per_recorder_and_number <= threshold_to_check) & classifications
+    bad_classification_with_threshold = (min_dtw_per_recorder_and_number <= threshold_to_check) & (~classifications)
+    return np.sum(good_classifications_with_threshold) - np.sum(bad_classification_with_threshold)
+
+
+def accuracy_of_threshold(threshold_to_check: float, dtw_table: NDArray[np.float32]):
+    min_dtw = np.min(dtw_table, axis=2)
+    min_dtw_numbers = np.delete(min_dtw, 10, axis=1)
+    predict = np.argmin(dtw_table, axis=2)
+    numbers_predictions = np.delete(predict, 10, axis=1)
+    numbers_dtw = np.delete(numbers_predictions, 10, axis=1)
+    true_numbers = np.tile(np.arange(10), dtw_table.shape[0])
+    correct_numbers_predictions = np.sum((numbers_predictions.ravel() == true_numbers) & (min_dtw_numbers < threshold_to_check))
+
+    min_dtw_per_random_recording = min_dtw[:, 10]
+    correct_random_predictions = np.sum(min_dtw_per_random_recording < threshold_to_check)
+
+def evaluate_classifications(dtw_table: NDArray[np.float32]):
+    argmin_dtw_per_recorder_and_number = np.argmin(dtw_table, axis=2)
+    classifications = np.full_like(argmin_dtw_per_recorder_and_number, fill_value=-1)
+    for recorder_index in range(argmin_dtw_per_recorder_and_number.shape[0]):
+        for number in range(argmin_dtw_per_recorder_and_number.shape[1]):
+            classifications[recorder_index, number] = argmin_dtw_per_recorder_and_number[recorder_index, number] == number
+    return classifications
+
+
+def learn_threshold(dtw_table: NDArray[np.float32]):
+    best_threshold = np.inf
+    best_threshold_score = -np.inf
+    min_dtw_per_recorder_and_number = np.min(dtw_table, axis=2)
+    for i in range(dtw_table.shape[0]):
+        for j in range(dtw_table.shape[1]):
+            thershold_value_to_check = min_dtw_per_recorder_and_number[i, j]
+            score = evalute_threshold(thershold_value_to_check, dtw_table)
+            if score > best_threshold_score:
+                best_threshold_score = score
+                best_threshold = thershold_value_to_check
+    return best_threshold
+
+
+def plot_confusion_matrix(y_true, y_pred, labels, set_name: str):
+    """
+    y_true: List of actual digits (e.g., [0, 1, 2, ...])
+    y_pred: List of predicted digits from your DTW
+    labels: List of label names (e.g., ["0", "1", ... "9"])
+    """
+    # 1. Calculate the matrix
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+
+    # 2. Plot heatmap
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=labels, yticklabels=labels)
+
+    plt.xlabel('Predicted Digit')
+    plt.ylabel('Actual Digit')
+    plt.title(f'Confusion Matrix: {set_name} Set')
+    plt.show()
+
+
+
 def main():
     dataset_path = "records"
     dataset = load_dataset(dataset_path)
-    dataset.train()
-    x = 1
+    # draw_mel_spectrograms(dataset)
+
+    training_set_dtw_table = calc_dtw_table(dataset.reference, dataset.training_set)
+    validation_set_dtw_table = calc_dtw_table(dataset.reference, dataset.validation_set)
+    # training_set_dtw_table = np.random.randint(low=0, high=1000, size=(4, 11, 11))
+    # validation_set_dtw_table = np.random.randint(low=0, high=1000, size=(4, 11, 11))
+
+    train_dtw_table = np.delete(training_set_dtw_table, 10, axis=1)  # this is the array we learn with.
+    # the 4x10x11 table without the random recordings of from the training set
+
+    plot_dtw_heatmap(dataset.training_set, training_set_dtw_table)
+    plot_dtw_heatmap(dataset.validation_set, validation_set_dtw_table)
+
+    best_threshold = learn_threshold(train_dtw_table)
+    train_score = evalute_threshold(best_threshold, training_set_dtw_table)
+    print('train score by my measure: ', train_score)
+    validation_score = evalute_threshold(best_threshold, validation_set_dtw_table)
+    print('validation score by my measure: ', validation_score)
+
+    predict_train = np.argmin(training_set_dtw_table, axis=2)
+    predict_train = np.where(predict_train == 10, 'random', predict_train.astype(str))
+    predict_validation = np.argmin(validation_set_dtw_table, axis=2)
+    predict_validation = np.where(predict_validation == 10, 'random', predict_validation.astype(str))
+    y_pred_train = predict_train.ravel()
+    labels = [str(i) for i in range(0, 10)] + ['random']
+    y_true_train = np.tile(labels, len(dataset.training_set))
+
+    y_pred_validation = predict_validation.ravel()
+    y_true_validation = np.tile(labels, len(dataset.validation_set))
+
+    print('train accuracy: ', np.sum(y_pred_train == y_true_train) / len(y_true_train))
+    print('validation accuracy: ', np.sum(y_pred_validation == y_true_validation) / len(y_true_validation))
+
+    plot_confusion_matrix(y_true_train, y_pred_train, labels, 'training')
+    plot_confusion_matrix(y_true_validation, y_pred_validation, labels, 'validation')
 
 
 if __name__ == '__main__':
