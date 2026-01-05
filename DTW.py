@@ -347,6 +347,16 @@ def evalute_threshold(threshold_to_check: float, dtw_table: NDArray[np.float32])
     return np.sum(good_classifications_with_threshold) - np.sum(bad_classification_with_threshold)
 
 
+def predict_with_threshold(threshold_to_check: float, dtw_table: NDArray[np.float32]):
+    min_dtw = np.min(dtw_table, axis=2)
+    predict = np.argmin(dtw_table, axis=2)
+    predictions_with_threshold = np.full_like(predict, fill_value="AT", dtype=object)
+    for recorder_index in range(predict.shape[0]):
+        for number in range(predict.shape[1]):
+            if min_dtw[recorder_index, number] < threshold_to_check:
+                predictions_with_threshold[recorder_index, number] = str(predict[recorder_index, number]) if predict[recorder_index, number] < 10 else RANDOM_RECORD_NAME
+    return predictions_with_threshold
+
 def accuracy_of_threshold(threshold_to_check: float, dtw_table: NDArray[np.float32]):
     min_dtw = np.min(dtw_table, axis=2)
     min_dtw_numbers = np.delete(min_dtw, 10, axis=1)
@@ -386,22 +396,28 @@ def learn_threshold(dtw_table: NDArray[np.float32]):
     return best_threshold
 
 
-def plot_confusion_matrix(y_true, y_pred, labels, set_name: str):
+def plot_confusion_matrix(y_true, y_pred, true_labels, pred_labels, set_name: str):
     """
-    y_true: List of actual digits (e.g., [0, 1, 2, ...])
-    y_pred: List of predicted digits from your DTW
-    labels: List of label names (e.g., ["0", "1", ... "9"])
+    true_labels: List of actual classes (e.g., ["0", "1", ..., "9"])
+    pred_labels: List of all possible predicted classes (e.g., ["0", ..., "9", "Unknown"])
     """
     # 1. Calculate the matrix
-    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    # Specifying labels=pred_labels ensures the matrix includes the 11th column
+    cm = confusion_matrix(y_true, y_pred, labels=pred_labels)
+
+    # Because y_true only contains 10 classes, cm will have 11 rows,
+    # but the 11th row will be all zeros. We should slice it.
+    # We keep only the rows that correspond to our actual true_labels.
+    cm_sliced = cm[:len(true_labels), :]
 
     # 2. Plot heatmap
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                xticklabels=labels, yticklabels=labels)
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(cm_sliced, annot=True, fmt='d', cmap='Blues',
+                xticklabels=pred_labels,
+                yticklabels=true_labels)
 
-    plt.xlabel('Predicted Digit')
-    plt.ylabel('Actual Digit')
+    plt.xlabel('Predicted Label (11 options)')
+    plt.ylabel('Actual Digit (10 options)')
     plt.title(f'Confusion Matrix: {set_name} Set')
     plt.show()
 
@@ -429,22 +445,24 @@ def main():
     validation_score = accuracy_of_threshold(best_threshold, validation_set_dtw_table)
     print('validation score by my measure: ', validation_score)
 
-    predict_train = np.argmin(training_set_dtw_table, axis=2)
-    predict_train = np.where(predict_train == 10, 'random', predict_train.astype(str))
-    predict_validation = np.argmin(validation_set_dtw_table, axis=2)
-    predict_validation = np.where(predict_validation == 10, 'random', predict_validation.astype(str))
+    # predict_train = np.argmin(training_set_dtw_table, axis=2)
+    # predict_train = np.where(predict_train == 10, 'random', predict_train.astype(str))
+    # predict_validation = np.argmin(validation_set_dtw_table, axis=2)
+    # predict_validation = np.where(predict_validation == 10, 'random', predict_validation.astype(str))
+    predict_train = predict_with_threshold(best_threshold, training_set_dtw_table)
+    predict_validation = predict_with_threshold(best_threshold, validation_set_dtw_table)
     y_pred_train = predict_train.ravel()
-    labels = [str(i) for i in range(0, 10)] + ['random']
-    y_true_train = np.tile(labels, len(dataset.training_set))
+    labels = [str(i) for i in range(0, 10)] + ['random'] + ["AT"]
+    y_true_train = np.tile([str(i) for i in range(0, 10)] + ['random'], len(dataset.training_set))
 
     y_pred_validation = predict_validation.ravel()
-    y_true_validation = np.tile(labels, len(dataset.validation_set))
+    y_true_validation = np.tile([str(i) for i in range(0, 10)] + ['random'], len(dataset.validation_set))
 
     # print('train accuracy: ', np.sum(y_pred_train == y_true_train) / len(y_true_train))
     # print('validation accuracy: ', np.sum(y_pred_validation == y_true_validation) / len(y_true_validation))
 
-    plot_confusion_matrix(y_true_train, y_pred_train, labels, 'training')
-    plot_confusion_matrix(y_true_validation, y_pred_validation, labels, 'validation')
+    plot_confusion_matrix(y_true_train, y_pred_train, [str(i) for i in range(0, 10)] + ['random'], labels, 'training')
+    plot_confusion_matrix(y_true_validation, y_pred_validation, [str(i) for i in range(0, 10)] + ['random'], labels, 'validation')
 
 
 if __name__ == '__main__':
