@@ -350,14 +350,17 @@ def evalute_threshold(threshold_to_check: float, dtw_table: NDArray[np.float32])
 def accuracy_of_threshold(threshold_to_check: float, dtw_table: NDArray[np.float32]):
     min_dtw = np.min(dtw_table, axis=2)
     min_dtw_numbers = np.delete(min_dtw, 10, axis=1)
+
     predict = np.argmin(dtw_table, axis=2)
     numbers_predictions = np.delete(predict, 10, axis=1)
-    numbers_dtw = np.delete(numbers_predictions, 10, axis=1)
+
     true_numbers = np.tile(np.arange(10), dtw_table.shape[0])
-    correct_numbers_predictions = np.sum((numbers_predictions.ravel() == true_numbers) & (min_dtw_numbers < threshold_to_check))
+    correct_numbers_predictions = np.sum((numbers_predictions.ravel() == true_numbers) & (min_dtw_numbers.ravel() < threshold_to_check))
 
     min_dtw_per_random_recording = min_dtw[:, 10]
     correct_random_predictions = np.sum(min_dtw_per_random_recording < threshold_to_check)
+
+    return (correct_numbers_predictions + correct_random_predictions) / (dtw_table.shape[0] * dtw_table.shape[1])
 
 def evaluate_classifications(dtw_table: NDArray[np.float32]):
     argmin_dtw_per_recorder_and_number = np.argmin(dtw_table, axis=2)
@@ -375,7 +378,8 @@ def learn_threshold(dtw_table: NDArray[np.float32]):
     for i in range(dtw_table.shape[0]):
         for j in range(dtw_table.shape[1]):
             thershold_value_to_check = min_dtw_per_recorder_and_number[i, j]
-            score = evalute_threshold(thershold_value_to_check, dtw_table)
+            # score = evalute_threshold(thershold_value_to_check, dtw_table)
+            score = accuracy_of_threshold(thershold_value_to_check, dtw_table)
             if score > best_threshold_score:
                 best_threshold_score = score
                 best_threshold = thershold_value_to_check
@@ -416,13 +420,13 @@ def main():
     train_dtw_table = np.delete(training_set_dtw_table, 10, axis=1)  # this is the array we learn with.
     # the 4x10x11 table without the random recordings of from the training set
 
-    plot_dtw_heatmap(dataset.training_set, training_set_dtw_table)
-    plot_dtw_heatmap(dataset.validation_set, validation_set_dtw_table)
+    # plot_dtw_heatmap(dataset.training_set, training_set_dtw_table)
+    # plot_dtw_heatmap(dataset.validation_set, validation_set_dtw_table)
 
-    best_threshold = learn_threshold(train_dtw_table)
-    train_score = evalute_threshold(best_threshold, training_set_dtw_table)
+    best_threshold = learn_threshold(training_set_dtw_table)
+    train_score = accuracy_of_threshold(best_threshold, training_set_dtw_table)
     print('train score by my measure: ', train_score)
-    validation_score = evalute_threshold(best_threshold, validation_set_dtw_table)
+    validation_score = accuracy_of_threshold(best_threshold, validation_set_dtw_table)
     print('validation score by my measure: ', validation_score)
 
     predict_train = np.argmin(training_set_dtw_table, axis=2)
@@ -436,8 +440,8 @@ def main():
     y_pred_validation = predict_validation.ravel()
     y_true_validation = np.tile(labels, len(dataset.validation_set))
 
-    print('train accuracy: ', np.sum(y_pred_train == y_true_train) / len(y_true_train))
-    print('validation accuracy: ', np.sum(y_pred_validation == y_true_validation) / len(y_true_validation))
+    # print('train accuracy: ', np.sum(y_pred_train == y_true_train) / len(y_true_train))
+    # print('validation accuracy: ', np.sum(y_pred_validation == y_true_validation) / len(y_true_validation))
 
     plot_confusion_matrix(y_true_train, y_pred_train, labels, 'training')
     plot_confusion_matrix(y_true_validation, y_pred_validation, labels, 'validation')
